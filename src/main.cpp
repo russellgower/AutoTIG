@@ -21,7 +21,8 @@
 #include "keypad.h"
 
 /* Define PIN functions */
-#define RELAY A3
+enum { pKEY = 0, pRELAY = A3, pSTEP = A4, pDIR = A5,
+       pRS = 8, pRW = 13, pENABLE = 9, pD4 = 4, pD5 = 5, pD6 = 6, pD7 = 7 };
 
 /* Define menu states */
 enum { MNU_SELECT_PRG, MNU_SELECT_RUN, MNU_SELECT_EDIT,
@@ -58,12 +59,13 @@ union Program_u {
 int maxPrgs = (1024 - sizeof(version)) / sizeof(Program);
 
 int state = MNU_SELECT_PRG;
+uint8_t updateLCD = 1;
 int curPrg = 1;
 int countdown;
 
-KeyPad KEY(0);
-LiquidCrystal lcd(8, 13, 9, 4, 5, 6, 7);
-AccelStepper stepper(AccelStepper::DRIVER, A4, A5);
+KeyPad KEY(pKEY);
+LiquidCrystal lcd(pRS, pRW, pENABLE, pD4, pD5, pD6, pD7);
+AccelStepper stepper(AccelStepper::DRIVER, pSTEP, pDIR);
 
 /* To allow printf to lcd */
 static FILE lcdout = {0};
@@ -99,11 +101,26 @@ uint8_t stateVal()
 /* Start a Linear run */
 void startLinear()
 {
-stepper.setMaxSpeed(100);
-stepper.setAcceleration(20);
-stepper.moveTo(50000);
+	float speed;
+	long pos;
+	// mm/s * steps/mm = steps/s
+	speed = Program.P.values[VAL_STEPS] * Program.P.values[VAL_SPEED];
+	// mm's * steps/mm = steps
+	pos = Program.P.values[VAL_STEPS] * Program.P.values[VAL_LENGTH];
 
 
+	stepper.setMaxSpeed(speed);
+	if (state == MNU_REWIND)
+	{
+		pos = ( 0 );  // return to 0
+		speed = ( 0 - speed);
+	}
+	else
+	{
+		stepper.setCurrentPosition(0);
+	}
+	stepper.moveTo(pos);
+	stepper.setSpeed(speed);
 }
 
 /* Start a Rotary run */
@@ -193,6 +210,9 @@ void saveProgram()
 
 void UpdateLCD()
 {
+	// Don't wast time updating the lcd if there is no change
+	if (!updateLCD) 
+		return;
 	// Display top line
 	lcd.setCursor(0,0);
 	switch (state)
@@ -209,7 +229,7 @@ void UpdateLCD()
 			fprintf(&lcdout,"%-16s","Running");
 			break;
 		case MNU_RUN_PRE_START:
-			fprintf(&lcdout,"Pre Start %04d", countdown );
+			fprintf(&lcdout,"Pre Start %04d", countdown / 100 );
 			break;
 		case MNU_SELECT_REWIND:
 		case MNU_SELECT_RETURN:
@@ -292,23 +312,26 @@ void UpdateLCD()
 
 
 	}
+
+	updateLCD = 0;
 }
 
 
 void setup()
 {
-  digitalWrite(RELAY,LOW);
-  pinMode(RELAY,OUTPUT);
-  digitalWrite(A4,LOW);
-  pinMode(A4,OUTPUT);
+  digitalWrite(pRELAY,LOW);
+  pinMode(pRELAY,OUTPUT);
+  digitalWrite(pSTEP,LOW);
+  pinMode(pDIR,OUTPUT);
   digitalWrite(A5,LOW);
-  pinMode(A5,OUTPUT);
+  pinMode(pDIR,OUTPUT);
   lcd.begin(16, 2);
 /* To allow printf to lcd */
   fdev_setup_stream (&lcdout, lcd_putchar, NULL, _FDEV_SETUP_WRITE);
   lcd.clear();
   Serial.begin(9600);
   initEEPROM();
+  loadProgram();
   UpdateLCD();
 }
 
@@ -319,12 +342,6 @@ void loop() {
 	uint8_t key = BTN_NONE;
 	unsigned long tm_now = millis();
 
-	stepper.run();
-Serial.print(tm_now);
-Serial.print(" ");
-Serial.print(tm_last);
-Serial.print(" ");
-Serial.println(ms);
 	ms = (tm_now - tm_last);
 	countdown -= ms;
 /*
@@ -348,14 +365,17 @@ Serial.println(ms);
 					if( curPrg > maxPrgs) 
 						curPrg = 1;
 					loadProgram();
+					updateLCD = 1;
 					break;
 				case BTN_DOWN:
 					curPrg -= KEY.HoldMultiplier(10);
 					if( curPrg < 1) 
 						curPrg = maxPrgs;
 					loadProgram();
+					updateLCD = 1;
 					break;
 				case BTN_RIGHT:
+					updateLCD = 1;
 					if( Program.P.type == PRG_EMPTY)
 						state = MNU_SELECT_EDIT;
 					else
@@ -367,12 +387,15 @@ Serial.println(ms);
 			switch( key )
 			{
 				case BTN_LEFT:
+					updateLCD = 1;
 					state = MNU_SELECT_PRG;
 					break;
 				case BTN_RIGHT:
+					updateLCD = 1;
 					state = MNU_SELECT_EDIT;
 					break;
 				case BTN_SELECT:
+					updateLCD = 1;
 					state = MNU_RUN_COUNTDOWN;
 					countdown = 5500; // 5 seconds
 					break;
@@ -382,26 +405,30 @@ Serial.println(ms);
 			switch( key )
 			{
 				case BTN_LEFT:
+					updateLCD = 1;
 					if( Program.P.type == PRG_EMPTY)
 						state = MNU_SELECT_PRG;
 					else
 						state = MNU_SELECT_RUN;
 					break;
 				case BTN_SELECT:
+					updateLCD = 1;
 					state = MNU_EDIT_TYPE;
 					break;
 			}
 			break;
 		case MNU_RUN_COUNTDOWN:
+			updateLCD = 1;
 			if( countdown < 1 ) 
 			{
 				// Turn relay on 
-				digitalWrite(RELAY,HIGH);
+				digitalWrite(pRELAY,HIGH);
 				state = MNU_RUN_PRE_START;
-				countdown = Program.P.values[VAL_PRE_START];
+				countdown = Program.P.values[VAL_PRE_START] * 1000; // stored in seconds counted in ms
 			}
 			break;
 		case MNU_RUN_PRE_START:
+			updateLCD = 1;
 			if( countdown < 1) 
 			{
 				if(Program.P.type == PRG_LINEAR) 
@@ -415,26 +442,41 @@ Serial.println(ms);
 					state = MNU_RUNNING;
 				}
 					
-digitalWrite(A3,LOW);
-			// TODO start stepper running
+digitalWrite(pRELAY,LOW);
 			}
 			break;
 		case MNU_RUNNING:
+			stepper.runSpeed();
 			if (key != BTN_NONE)
 			{
 				state = MNU_SELECT_REWIND;
+				updateLCD = 1;
 			} 
-			// TODO check if still running
+			if (stepper.distanceToGo() == 0)
+			{
+				state = MNU_SELECT_REWIND;
+				updateLCD = 1;
+			}	
 			break;
 		case MNU_SELECT_REWIND:
 			switch( key )
 			{
 				case BTN_RIGHT:
 					state = MNU_SELECT_RETURN;
+					updateLCD = 1;
 					break;
 				case BTN_SELECT:
-					// TODO start stepper rewinding
 					state = MNU_REWIND;
+					if(Program.P.type == PRG_LINEAR) 
+					{
+						startLinear();
+					}	 
+					else if (Program.P.type == PRG_ROTARY)
+					{
+						startRotary();
+					}
+					
+					updateLCD = 1;
 					break;
 			}
 			break;
@@ -442,29 +484,38 @@ digitalWrite(A3,LOW);
 			switch( key )
 			{
 				case BTN_LEFT:
+					updateLCD = 1;
 					state = MNU_SELECT_REWIND;
 					break;
 				case BTN_SELECT:
+					updateLCD = 1;
 					state = MNU_RETURN;
 					break;
 			}
 			break;
 		case MNU_REWIND:
-			// TODO rewind (like running)
-			state = MNU_SELECT_RUN;
+			stepper.runSpeed();
+			if (stepper.distanceToGo() == 0)
+			{
+				state = MNU_SELECT_RUN;
+				updateLCD = 1;
+			}	
 			break;
 		case MNU_RETURN:
+			updateLCD = 1;
 			state = MNU_SELECT_RUN;
 			break;
 		case MNU_EDIT_TYPE:
 			switch( key )
 			{
 				case BTN_UP:
+					updateLCD = 1;
 					Program.P.type++;
 					if (Program.P.type == PRG_LAST)
 						Program.P.type=PRG_EMPTY;
 					break; 
 				case BTN_DOWN:  
+					updateLCD = 1;
 					if (Program.P.type == PRG_EMPTY)
 						Program.P.type = PRG_LAST;
 					
@@ -472,10 +523,12 @@ digitalWrite(A3,LOW);
 					break; 
 				case BTN_RIGHT:
 				case BTN_SELECT:
+					updateLCD = 1;
 					if( Program.P.type != PRG_EMPTY )
 						state++;
 					break;
 				case BTN_LEFT:
+					updateLCD = 1;
 					state = MNU_EDIT_SAVE_NO;
 					break;
 					
@@ -491,6 +544,7 @@ digitalWrite(A3,LOW);
 			switch( key )
 			{
 				case BTN_RIGHT:
+					updateLCD = 1;
 					if (Program.P.type == PRG_ROTARY && 
 						    state == MNU_EDIT_PRE_START)
 						state = MNU_EDIT_RADIUS;
@@ -501,6 +555,7 @@ digitalWrite(A3,LOW);
 						state++;
 					break;
 				case BTN_LEFT:
+					updateLCD = 1;
 					if (Program.P.type == PRG_ROTARY &&
 						      state == MNU_EDIT_RADIUS)
 						state = MNU_EDIT_PRE_START;
@@ -508,10 +563,12 @@ digitalWrite(A3,LOW);
 						state--;
 					break;
 				case BTN_UP:
+					updateLCD = 1;
 					Program.P.values[stateVal()] += 
 						0.01 * KEY.HoldMultiplier();
 					break;
 				case BTN_DOWN:
+					updateLCD = 1;
 					Program.P.values[stateVal()] -= 
 						0.01 * KEY.HoldMultiplier();
 					break;
@@ -525,9 +582,11 @@ digitalWrite(A3,LOW);
 			switch( key )
 			{
 				case BTN_RIGHT:
+					updateLCD = 1;
 					state = MNU_EDIT_SAVE_YES;
 					break;
 				case BTN_SELECT:
+					updateLCD = 1;
 					loadProgram();
 					state = MNU_SELECT_PRG;
 					break;
@@ -537,9 +596,11 @@ digitalWrite(A3,LOW);
 			switch( key )
 			{
 				case BTN_LEFT:
+					updateLCD = 1;
 					state = MNU_EDIT_SAVE_NO;
 					break;
 				case BTN_SELECT:
+					updateLCD = 1;
 					saveProgram();
 					state = MNU_SELECT_PRG;
 					break;
